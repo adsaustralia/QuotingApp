@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 import openpyxl
 
-APP_VERSION = "simple-ui-v4-openpyxl-stylecopy-safe"
+APP_VERSION = "simple-ui-v5-description-fallback-fix"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -316,7 +316,7 @@ if qty_mode == "Multiple Qty columns (Adidas)":
         lines["shape"] = "circle"
         lines["size_display"] = "DIA " + lines[dia_col].astype(str)
     else:
-        txt = lines[size_text_col].astype(str) if (size_text_col in lines.columns) else lines.get("Description","").astype(str)
+        txt = lines[size_text_col].astype(str) if (size_text_col in lines.columns) else (lines["Description"].astype(str) if "Description" in lines.columns else pd.Series([""]*len(lines), index=lines.index).astype(str))
         geo = txt.apply(parse_size_text).apply(pd.Series)
         lines = pd.concat([lines, geo.rename(columns={"shape":"shape_parsed","width_mm":"w_parsed","height_mm":"h_parsed","diameter_mm":"d_parsed"})], axis=1)
         lines["width_mm"] = pd.to_numeric(lines["w_parsed"], errors="coerce") * u
