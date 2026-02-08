@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 import openpyxl
 
-APP_VERSION = "simple-ui-v3-openpyxl-preserve-format"
+APP_VERSION = "simple-ui-v4-openpyxl-stylecopy-safe"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -542,15 +542,20 @@ def export_preserving_excel() -> bytes:
     if price_target == "Add new column at end":
         target_col_idx = ws.max_column + 1
         header_cell = ws.cell(row=hdr_row, column=target_col_idx, value="Price")
-        # copy style from previous header cell if possible
+        # copy style from previous header cell if possible (safe copy)
         if target_col_idx > 1:
-            prev = ws.cell(row=hdr_row, column=target_col_idx-1)
-            header_cell._style = prev._style
-            header_cell.font = prev.font
-            header_cell.fill = prev.fill
-            header_cell.border = prev.border
-            header_cell.alignment = prev.alignment
-            header_cell.number_format = prev.number_format
+            try:
+                from copy import copy as _copy
+                prev = ws.cell(row=hdr_row, column=target_col_idx-1)
+                header_cell._style = _copy(prev._style)
+                header_cell.font = _copy(prev.font)
+                header_cell.fill = _copy(prev.fill)
+                header_cell.border = _copy(prev.border)
+                header_cell.alignment = _copy(prev.alignment)
+                header_cell.number_format = prev.number_format
+            except Exception:
+                # If style copy fails, keep default style to avoid crashing
+                pass
     else:
         # Locate existing column by matching the header cell value in header row
         target_col_idx = None
