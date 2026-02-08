@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 import openpyxl
 
-APP_VERSION = "simple-ui-v1"
+APP_VERSION = "simple-ui-v2-preserve-export"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -202,8 +202,8 @@ units = top3.selectbox("Units", ["mm","cm","m"], index=0)
 u = {"mm":1.0,"cm":10.0,"m":1000.0}[units]
 df_raw = pd.read_excel(uploaded, sheet_name=sheet_name, header=int(header_row)-1)
 
-with st.expander("Preview (top 15 rows)", expanded=False):
-    st.dataframe(df_raw.head(15), use_container_width=True)
+with st.expander("Preview (all rows)", expanded=False):
+    st.dataframe(df_raw, use_container_width=True)
 
 # ---------------- PICK VALUES (HORIZONTAL) ----------------
 st.subheader("Pick Values")
@@ -436,11 +436,100 @@ summary = pd.DataFrame([
 st.markdown("**Totals**")
 st.table(summary)
 
+# ---------------- EXPORT (Preserve customer format) ----------------
+st.subheader("Export")
+
+e1, e2, e3 = st.columns([2.2, 2.2, 1.6])
+with e1:
+    price_target = st.selectbox(
+        "Where to put price in the exported Excel (column)",
+        options=["Add new column at end"] + df_raw.columns.tolist()
+    )
+with e2:
+    price_mode = st.radio(
+        "Price output mode",
+        ["Row total (sum of all qty variants)", "Per-qty-cell (price in each qty column)"],
+        index=0,
+        horizontal=True
+    )
+with e3:
+    include_detail_sheets = st.checkbox("Include detail sheets (Line Items + Summary)", value=True)
+
+def build_customer_format_export() -> pd.DataFrame:
+    df_out = df_raw.copy()
+    col_name = "Price" if price_target == "Add new column at end" else price_target
+
+    # Ensure target column exists (create at end if needed)
+    if col_name not in df_out.columns:
+        df_out[col_name] = np.nan
+
+    if price_mode.startswith("Row total"):
+        # Sum line_total back to original row index
+        # If melt path, 'lines' is melted and keeps original index via id_vars rows; we can use its current index alignment.
+        # We'll attach an origin row id using merge on all base cols if possible; simplest: use line-level join by index from df_raw if present.
+        # Since melt duplicates rows, we approximate by grouping using the base columns that exist in df_out.
+        base_keys = [c for c in ["Line Reference", "Description", "Width", "Height", "Stock"] if c in df_out.columns and c in lines.columns]
+        if len(base_keys) >= 1:
+            row_totals = lines.groupby(base_keys)["line_total"].sum().reset_index()
+            df_out = df_out.merge(row_totals, on=base_keys, how="left", suffixes=("", "_calc"))
+            df_out[col_name] = df_out["line_total"].astype(float)
+            df_out.drop(columns=["line_total"], inplace=True)
+        else:
+            # fallback: cannot find keys, set blank
+            df_out[col_name] = np.nan
+
+    else:
+        # Per-qty-cell: only valid when using multiple qty columns
+        if "variant_spec" in lines.columns:
+            # Create a pivot table of prices aligned to the qty columns
+            base_keys = [c for c in ["Line Reference", "Description", "Width", "Height", "Stock"] if c in df_out.columns and c in lines.columns]
+            if len(base_keys) >= 1:
+                pv = lines.pivot_table(index=base_keys, columns="variant_spec", values="line_total", aggfunc="sum")
+                pv = pv.reset_index()
+                df_out = df_out.merge(pv, on=base_keys, how="left", suffixes=("", ""))
+                # Now, for each qty column that exists in df_out and in pivot columns, optionally leave it or overwrite?
+                # We will NOT overwrite qty values. Instead, write prices into the chosen price column as JSON-like string if user selected a single column.
+                if price_target != "Add new column at end" and price_target in df_raw.columns:
+                    # Put row-wise total in selected column to avoid overwriting qty columns.
+                    price_cols = [c for c in pv.columns if c not in base_keys]
+                    df_out[col_name] = df_out[price_cols].sum(axis=1, numeric_only=True)
+                    # drop pivot price cols to preserve format strictly
+                    df_out.drop(columns=price_cols, inplace=True, errors="ignore")
+                else:
+                    # Add new column at end: create a compact string summary of per-cell prices
+                    price_cols = [c for c in pv.columns if c not in base_keys]
+                    def pack_row(r):
+                        items = []
+                        for pc in price_cols:
+                            v = r.get(pc)
+                            if pd.notna(v) and float(v) != 0:
+                                items.append(f"{pc}: {float(v):.2f}")
+                        return " | ".join(items)
+                    df_out[col_name] = df_out.apply(pack_row, axis=1)
+                    df_out.drop(columns=price_cols, inplace=True, errors="ignore")
+            else:
+                df_out[col_name] = np.nan
+        else:
+            df_out[col_name] = np.nan
+
+    return df_out
+
+def export_preserving_excel() -> bytes:
+    df_customer = build_customer_format_export()
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        # Write customer-format sheet with same name
+        df_customer.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+        if include_detail_sheets:
+            summary.to_excel(writer, index=False, sheet_name="Quote Summary")
+            review.to_excel(writer, index=False, sheet_name="Line Items")
+    return bio.getvalue()
+
 b1, b2 = st.columns(2)
 with b1:
-    xbytes = export_quote_excel(review, summary)
+    xbytes = export_preserving_excel()
     st.download_button(
-        "Download Quote Excel",
+        "Download Quote Excel (preserve format)",
         data=xbytes,
         file_name=f"Quote_{customer}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
