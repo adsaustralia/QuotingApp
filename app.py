@@ -226,9 +226,6 @@ if uploaded is None:
 # Step A: Read sheet + header row
 # -------------------------
 col1, col2, col3 = st.columns([1,1,2])
-with col1:
-    sheet_name = st.selectbox("Sheet", options=None, index=0, options_kwargs=None)  # placeholder
-
 # Streamlit doesn't allow dynamic options_kwargs; do it properly
 import openpyxl
 wb = openpyxl.load_workbook(uploaded, read_only=True, data_only=True)
