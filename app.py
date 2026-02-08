@@ -331,22 +331,29 @@ if qty_mode == "Multiple variant columns (Adidas)":
         lines["width_mm"] = np.nan
         lines["height_mm"] = np.nan
 
-    # From size_text in variant_spec if available
+    # From size_text in variant_spec if available (avoid duplicate column names)
     geo = lines["size_text"].apply(parse_size_from_text).apply(pd.Series)
+    geo = geo.rename(columns={
+        "shape": "shape_parsed",
+        "width_mm": "width_mm_parsed",
+        "height_mm": "height_mm_parsed",
+        "diameter_mm": "diameter_mm_parsed",
+    })
     lines = pd.concat([lines, geo], axis=1)
 
-    # If parsed width/height missing, fall back to columns
-    lines["width_mm"] = np.where(lines["width_mm"].notna(), lines["width_mm"], lines["width_mm"])  # keep
-    lines["height_mm"] = np.where(lines["height_mm"].notna(), lines["height_mm"], lines["height_mm"])  # keep
-    # Prefer parsed size for width/height
-    lines["width_mm"] = np.where(pd.to_numeric(lines["width_mm"], errors="coerce").notna(), lines["width_mm"], lines["width_mm"])
-    # If parsed values exist, overwrite
-    lines["width_mm"] = np.where(geo["width_mm"].notna(), geo["width_mm"]*u, lines["width_mm"])
-    lines["height_mm"] = np.where(geo["height_mm"].notna(), geo["height_mm"]*u, lines["height_mm"])
-    lines["diameter_mm"] = np.where(geo["diameter_mm"].notna(), geo["diameter_mm"]*u, np.nan)
+    # Prefer parsed size (from variant header) when present; otherwise use Width/Height columns
+    lines["width_mm"] = np.where(pd.to_numeric(lines["width_mm_parsed"], errors="coerce").notna(),
+                                 pd.to_numeric(lines["width_mm_parsed"], errors="coerce") * u,
+                                 lines["width_mm"])
+    lines["height_mm"] = np.where(pd.to_numeric(lines["height_mm_parsed"], errors="coerce").notna(),
+                                  pd.to_numeric(lines["height_mm_parsed"], errors="coerce") * u,
+                                  lines["height_mm"])
+    lines["diameter_mm"] = np.where(pd.to_numeric(lines["diameter_mm_parsed"], errors="coerce").notna(),
+                                    pd.to_numeric(lines["diameter_mm_parsed"], errors="coerce") * u,
+                                    np.nan)
 
-    # Set final shape
-    lines["shape_final"] = lines["shape"].replace({"unknown": None})
+    # Final shape: parsed shape if known, else default selected
+    lines["shape_final"] = lines["shape_parsed"].replace({"unknown": None})
     lines["shape_final"] = lines["shape_final"].fillna(shape_default)
 
     # Choose customer stock: prefer spec stock if present, else base stock column
