@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 import openpyxl
 
-APP_VERSION = "simple-ui-v5-description-fallback-fix"
+APP_VERSION = "simple-ui-v6-autodetect-rb-au-round"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -212,7 +212,10 @@ c1, c2, c3, c4 = st.columns([2.2, 1.6, 2.0, 1.4])
 
 with c1:
     st.markdown("**Size**")
-    size_mode = st.radio("", ["W+H columns", "Size text column", "Circle diameter column"], index=0, horizontal=True, label_visibility="collapsed")
+    size_opts = ["W+H columns", "Size text column", "Circle diameter column"]
+    # Auto default: if Width/Height exist, use W+H; else use Size text
+    _size_default = 0 if ("Width" in df_raw.columns and "Height" in df_raw.columns) else 1
+    size_mode = st.radio("", size_opts, index=_size_default, horizontal=True, label_visibility="collapsed")
     if size_mode == "W+H columns":
         w_col = st.selectbox("Width column", df_raw.columns, index=df_raw.columns.get_loc("Width") if "Width" in df_raw.columns else 0)
         h_col = st.selectbox("Height column", df_raw.columns, index=df_raw.columns.get_loc("Height") if "Height" in df_raw.columns else 0)
@@ -233,13 +236,21 @@ with c2:
 
 with c3:
     st.markdown("**Qty**")
-    qty_mode = st.radio("", ["Single Qty column", "Multiple Qty columns (Adidas)"], index=1, horizontal=True, label_visibility="collapsed")
+    qty_opts = ["Single Qty column", "Multiple Qty columns (Adidas)"]
+    # Auto default: if a "Qty" column exists, default to single; else multiple
+    _qty_default = 0 if "Qty" in df_raw.columns else 1
+    qty_mode = st.radio("", qty_opts, index=_qty_default, horizontal=True, label_visibility="collapsed")
     if qty_mode == "Single Qty column":
         qty_col = st.selectbox("Qty column", df_raw.columns, index=df_raw.columns.get_loc("Qty") if "Qty" in df_raw.columns else 0)
         start_col = end_col = None
     else:
-        start_col = st.selectbox("Start qty column", df_raw.columns)
-        end_col = st.selectbox("End qty column", df_raw.columns, index=len(df_raw.columns)-1)
+                # Suggest start/end from numeric-ish columns
+        _numeric_cols = [c for c in df_raw.columns if pd.to_numeric(df_raw[c], errors="coerce").notna().sum() > 0]
+        _numeric_cols = [c for c in _numeric_cols if (pd.to_numeric(df_raw[c], errors="coerce").fillna(0) > 0).any()]
+        _start_default = _numeric_cols[0] if _numeric_cols else df_raw.columns[0]
+        _end_default = _numeric_cols[-1] if _numeric_cols else df_raw.columns[-1]
+        start_col = st.selectbox("Start qty column", df_raw.columns, index=df_raw.columns.get_loc(_start_default))
+        end_col = st.selectbox("End qty column", df_raw.columns, index=df_raw.columns.get_loc(_end_default))
         qty_col = None
 
 with c4:
