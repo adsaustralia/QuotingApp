@@ -1,16 +1,15 @@
-# Quoting App — Adidas MVP (Streamlit)
+# Quoting App — Simple UI (Streamlit)
 
-This is a starter internal web app to quote from the Adidas pricing sheet format.
+Minimal horizontal UI:
+- Size
+- Stock
+- Qty
+- Sides (SS/DS)
 
-## What it does (MVP)
-- Upload Adidas Excel
-- Pick header row + sheet
-- Pick columns (Size, Stock, Qty mode)
-- Melt Adidas "variant qty columns" into line items
-- Parse the variant header (newline-separated spec)
-- Calculate SQM (rectangle/circle/odd)
-- Map customer stock names to your internal standard stocks (sqm rate)
-- Export Quote as **Excel** and **PDF**
+Supports:
+- Width+Height rectangles
+- Circles (Diameter or 'DIA 600' in text)
+- Adidas-style multiple qty columns (melt by selected start/end columns)
 
 ## Run
 ```bash
@@ -18,7 +17,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Files
-- `app.py` Streamlit app
-- `data/standard_stocks.csv` sample internal stock rates
-- `data/mappings/*_stock_map.json` saved customer stock mappings
+## Standard stocks CSV
+`data/standard_stocks.csv` must contain:
+- `stock_name_std`
+- `sqm_rate`

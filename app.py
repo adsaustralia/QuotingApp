@@ -5,26 +5,21 @@ import numpy as np
 import re, json, math, io
 from pathlib import Path
 from datetime import datetime
+import openpyxl
 
-# =========================
-# Storage paths (local)
-# =========================
+APP_VERSION = "simple-ui-v1"
+
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 MAPPING_DIR = DATA_DIR / "mappings"
 MAPPING_DIR.mkdir(parents=True, exist_ok=True)
-
 DEFAULT_STANDARD_STOCKS_CSV = DATA_DIR / "standard_stocks.csv"
 
-# =========================
-# Helpers
-# =========================
-def clean_text(s: str) -> str:
+def clean_text(s) -> str:
     if s is None or (isinstance(s, float) and np.isnan(s)):
         return ""
     s = str(s).strip().lower()
     s = re.sub(r"\s+", " ", s)
-    # normalize common symbols
     s = s.replace("Ø", "dia ").replace("⌀", "dia ")
     return s
 
@@ -38,71 +33,50 @@ def save_mapping(customer: str, mapping: dict) -> None:
     fp = MAPPING_DIR / f"{clean_text(customer).replace(' ', '_')}_stock_map.json"
     fp.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
 
-def parse_size_from_text(text: str):
-    """
-    Returns dict with keys:
-      shape: rectangle|circle|unknown
-      width_mm, height_mm, diameter_mm
-    """
+def parse_variant_spec(col_name: str):
+    raw = "" if col_name is None else str(col_name)
+    parts = [p.strip() for p in raw.split("\\n") if str(p).strip()]
+    out = {"size_text": None, "colour": None, "sides_text": None, "stock_from_header": None, "finishing": None}
+    if len(parts) >= 1: out["size_text"] = parts[0]
+    if len(parts) >= 2: out["colour"] = parts[1]
+    if len(parts) >= 3: out["sides_text"] = parts[2]
+    if len(parts) >= 4: out["stock_from_header"] = parts[3]
+    if len(parts) >= 5: out["finishing"] = parts[4]
+    return out
+
+def parse_size_text(text: str):
     t = clean_text(text)
     if not t:
-        return {"shape":"unknown", "width_mm":None, "height_mm":None, "diameter_mm":None}
+        return {"shape":"unknown","width_mm":np.nan,"height_mm":np.nan,"diameter_mm":np.nan}
 
-    # circle patterns: dia 600, diameter 600, ø600
-    m = re.search(r"(dia(?:meter)?)\s*[:=]?\s*(\d+(?:\.\d+)?)", t)
+    m = re.search(r"(dia(?:meter)?)\\s*[:=]?\\s*(\\d+(?:\\.\\d+)?)", t)
     if m:
         d = float(m.group(2))
-        return {"shape":"circle", "width_mm":None, "height_mm":None, "diameter_mm":d}
+        return {"shape":"circle","width_mm":np.nan,"height_mm":np.nan,"diameter_mm":d}
 
-    # rectangle patterns: 1200 x 900, 1200*900, 1200 by 900
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(x|\*|by)\s*(\d+(?:\.\d+)?)", t)
+    m = re.search(r"(\\d+(?:\\.\\d+)?)\\s*(x|\\*|by)\\s*(\\d+(?:\\.\\d+)?)", t)
     if m:
         w = float(m.group(1))
         h = float(m.group(3))
-        return {"shape":"rectangle", "width_mm":w, "height_mm":h, "diameter_mm":None}
+        return {"shape":"rectangle","width_mm":w,"height_mm":h,"diameter_mm":np.nan}
 
-    return {"shape":"unknown", "width_mm":None, "height_mm":None, "diameter_mm":None}
+    return {"shape":"unknown","width_mm":np.nan,"height_mm":np.nan,"diameter_mm":np.nan}
 
-def sqm_from_geometry(shape: str, width_mm=None, height_mm=None, diameter_mm=None, odd_factor=1.15):
-    if shape == "rectangle" and width_mm and height_mm:
-        return (width_mm/1000.0) * (height_mm/1000.0)
-    if shape == "circle" and diameter_mm:
-        r = (diameter_mm/1000.0) / 2.0
+def sqm_calc(shape: str, width_mm=None, height_mm=None, diameter_mm=None):
+    if shape == "rectangle" and pd.notna(width_mm) and pd.notna(height_mm):
+        return (float(width_mm)/1000.0) * (float(height_mm)/1000.0)
+    if shape == "circle" and pd.notna(diameter_mm):
+        r = (float(diameter_mm)/1000.0)/2.0
         return math.pi * (r**2)
-    if shape == "odd" and width_mm and height_mm:
-        return (width_mm/1000.0) * (height_mm/1000.0) * odd_factor
     return np.nan
 
-def parse_variant_spec(col_name: str):
-    """
-    Adidas file uses headers with newline-separated spec, e.g.
-      "1000 x 2700\n4 colour\n1pp\nPrinted Mattex Skin\nRubber Edging"
-
-    Returns:
-      dict(size_text, colour, sides, stock_customer, finishing)
-    """
-    raw = "" if col_name is None else str(col_name)
-    parts = [p.strip() for p in raw.split("\n") if str(p).strip()]
-    out = {"size_text": None, "colour": None, "sides": None, "stock_customer": None, "finishing": None}
-
-    if len(parts) >= 1:
-        out["size_text"] = parts[0]
-    if len(parts) >= 2:
-        out["colour"] = parts[1]
-    if len(parts) >= 3:
-        out["sides"] = parts[2]
-    if len(parts) >= 4:
-        out["stock_customer"] = parts[3]
-    if len(parts) >= 5:
-        out["finishing"] = parts[4]
-    return out
-
-def is_probably_variant_col(series: pd.Series) -> bool:
-    # variant columns are numeric-ish and contain at least one > 0 value
-    s = pd.to_numeric(series, errors="coerce")
-    if s.notna().sum() == 0:
-        return False
-    return (s.fillna(0) > 0).any()
+def sides_normalize(val: str, default="SS"):
+    t = clean_text(val)
+    if t in ("ds","2s","double","2pp","two"):
+        return "DS"
+    if t in ("ss","1s","single","1pp","one"):
+        return "SS"
+    return default
 
 def export_quote_excel(df_lines: pd.DataFrame, df_summary: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
@@ -112,7 +86,6 @@ def export_quote_excel(df_lines: pd.DataFrame, df_summary: pd.DataFrame) -> byte
     return bio.getvalue()
 
 def export_quote_pdf(df_summary: pd.DataFrame, df_lines: pd.DataFrame, title="Quote") -> bytes:
-    # Lightweight PDF using reportlab
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
@@ -121,32 +94,29 @@ def export_quote_pdf(df_summary: pd.DataFrame, df_lines: pd.DataFrame, title="Qu
     c = canvas.Canvas(bio, pagesize=A4)
     w, h = A4
 
-    y = h - 20*mm
+    y = h - 18*mm
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(20*mm, y, title)
+    c.drawString(18*mm, y, title)
+    y -= 7*mm
+    c.setFont("Helvetica", 9)
+    c.drawString(18*mm, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  {APP_VERSION}")
     y -= 8*mm
-    c.setFont("Helvetica", 10)
-    c.drawString(20*mm, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    y -= 10*mm
 
-    # Summary
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(20*mm, y, "Summary")
+    c.drawString(18*mm, y, "Summary")
     y -= 6*mm
     c.setFont("Helvetica", 10)
     for _, row in df_summary.iterrows():
-        line = f"{row['Label']}: {row['Value']}"
-        c.drawString(22*mm, y, line)
+        c.drawString(20*mm, y, f"{row['Label']}: {row['Value']}")
         y -= 5*mm
 
-    y -= 5*mm
+    y -= 4*mm
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(20*mm, y, "Line Items")
+    c.drawString(18*mm, y, "Line Items (Material)")
     y -= 6*mm
 
-    # Table header
-    headers = ["Description", "Qty", "Size", "Stock", "Total SQM", "Rate", "Line Total"]
-    col_x = [20, 70, 95, 135, 175, 195, 210]  # in mm
+    headers = ["Qty", "Sides", "Shape", "Size", "Stock", "Total SQM", "Rate", "Line Total"]
+    col_x = [18, 32, 46, 62, 95, 150, 175, 195]  # mm
     c.setFont("Helvetica-Bold", 8)
     for hx, head in zip(col_x, headers):
         c.drawString(hx*mm, y, head)
@@ -154,322 +124,309 @@ def export_quote_pdf(df_summary: pd.DataFrame, df_lines: pd.DataFrame, title="Qu
     c.setFont("Helvetica", 8)
 
     def money(x):
-        try:
-            return f"{float(x):,.2f}"
-        except:
-            return str(x)
+        try: return f"{float(x):,.2f}"
+        except: return str(x)
 
-    # rows
-    for _, r in df_lines.head(60).iterrows():  # keep MVP simple
-        if y < 20*mm:
+    for _, r in df_lines.head(80).iterrows():
+        if y < 18*mm:
             c.showPage()
-            y = h - 20*mm
+            y = h - 18*mm
             c.setFont("Helvetica-Bold", 8)
             for hx, head in zip(col_x, headers):
                 c.drawString(hx*mm, y, head)
             y -= 4*mm
             c.setFont("Helvetica", 8)
 
-        desc = str(r.get("description",""))[:26]
-        qty = r.get("qty", "")
-        size = str(r.get("size_text",""))[:14]
-        stock = str(r.get("stock_std",""))[:18]
-        tsqm = r.get("total_sqm", "")
-        rate = r.get("sqm_rate", "")
-        total = r.get("line_total", "")
-
-        values = [desc, str(qty), size, stock, money(tsqm), money(rate), money(total)]
-        for hx, val in zip(col_x, values):
-            c.drawString(hx*mm, y, val)
+        size_txt = r.get("size_display","")
+        vals = [
+            str(int(r.get("qty",0))),
+            str(r.get("sides","")),
+            str(r.get("shape","")),
+            str(size_txt)[:16],
+            str(r.get("stock_std",""))[:22],
+            money(r.get("total_sqm",0)),
+            money(r.get("sqm_rate",0)),
+            money(r.get("line_total",0)),
+        ]
+        for hx, v in zip(col_x, vals):
+            c.drawString(hx*mm, y, v)
         y -= 4*mm
 
     c.showPage()
     c.save()
     return bio.getvalue()
 
-# =========================
-# Streamlit UI
-# =========================
-st.set_page_config(page_title="Quoting App (Adidas MVP)", layout="wide")
-
-st.title("Quoting App — Adidas Sheet MVP (Material SQM Pricing)")
+# ---------------- UI ----------------
+st.set_page_config(page_title="Quoting App (Simple UI)", layout="wide")
+st.title("Quoting App — Simple UI (W/H + Circle + Stock Mapping)")
+st.caption("Pick only Size, Stock, Qty, Sides. Material = Total SQM × SQM Rate.")
 
 with st.sidebar:
-    st.header("1) Upload")
+    st.header("Upload")
     customer = st.text_input("Customer", value="Adidas")
-    uploaded = st.file_uploader("Upload customer Excel", type=["xlsx"])
+    uploaded = st.file_uploader("Customer Excel", type=["xlsx"])
 
     st.divider()
-    st.header("2) Standard Stocks")
-    st.caption("This is your internal list with sqm rates. You can replace the sample CSV in /data.")
-    if DEFAULT_STANDARD_STOCKS_CSV.exists():
-        st.success(f"Loaded default: {DEFAULT_STANDARD_STOCKS_CSV.name}")
+    st.header("Standard stock rates")
+    st.caption("CSV columns required: stock_name_std, sqm_rate")
     std_upload = st.file_uploader("Optional: upload standard_stocks.csv", type=["csv"])
 
-# Load standard stocks
+if uploaded is None:
+    st.info("Upload an Excel file to start.")
+    st.stop()
+
+# Standard stocks
 if std_upload is not None:
     df_std = pd.read_csv(std_upload)
 else:
     if DEFAULT_STANDARD_STOCKS_CSV.exists():
         df_std = pd.read_csv(DEFAULT_STANDARD_STOCKS_CSV)
     else:
-        df_std = pd.DataFrame(columns=["stock_id","stock_name_std","sqm_rate"])
+        df_std = pd.DataFrame(columns=["stock_name_std","sqm_rate"])
 
-std_options = df_std["stock_name_std"].dropna().astype(str).tolist()
-std_rate_map = dict(zip(df_std["stock_name_std"].astype(str), pd.to_numeric(df_std["sqm_rate"], errors="coerce")))
+df_std["stock_name_std"] = df_std["stock_name_std"].astype(str)
+df_std["sqm_rate"] = pd.to_numeric(df_std["sqm_rate"], errors="coerce")
+std_options = df_std["stock_name_std"].dropna().tolist()
+std_rate_map = dict(zip(df_std["stock_name_std"], df_std["sqm_rate"]))
 
-if uploaded is None:
-    st.info("Upload an Adidas Excel file to start.")
-    st.stop()
-
-# -------------------------
-# Step A: Read sheet + header row
-# -------------------------
-col1, col2, col3 = st.columns([1,1,2])
-# Streamlit doesn't allow dynamic options_kwargs; do it properly
-import openpyxl
+# Sheets
 wb = openpyxl.load_workbook(uploaded, read_only=True, data_only=True)
 sheet_names = wb.sheetnames
 wb.close()
 
-sheet_name = col1.selectbox("Sheet", sheet_names, index=sheet_names.index("Standard_ WHS Pr MY AUS") if "Standard_ WHS Pr MY AUS" in sheet_names else 0)
-header_row_1idx = col2.number_input("Header row (1-indexed)", min_value=1, max_value=100, value=6, step=1)
-header = int(header_row_1idx) - 1
+top1, top2, top3 = st.columns([2,1,2])
+sheet_name = top1.selectbox("Sheet", sheet_names, index=sheet_names.index("Standard_ WHS Pr MY AUS") if "Standard_ WHS Pr MY AUS" in sheet_names else 0)
+header_row = top2.number_input("Header row (1-indexed)", 1, 100, 6, 1)
+units = top3.selectbox("Units", ["mm","cm","m"], index=0)
 
-df_raw = pd.read_excel(uploaded, sheet_name=sheet_name, header=header)
-st.caption(f"Loaded {df_raw.shape[0]} rows × {df_raw.shape[1]} cols from '{sheet_name}' using header row {header_row_1idx}.")
+u = {"mm":1.0,"cm":10.0,"m":1000.0}[units]
+df_raw = pd.read_excel(uploaded, sheet_name=sheet_name, header=int(header_row)-1)
 
-# Show preview
-with st.expander("Preview (top 20 rows)", expanded=True):
-    st.dataframe(df_raw.head(20), use_container_width=True)
+with st.expander("Preview (top 15 rows)", expanded=False):
+    st.dataframe(df_raw.head(15), use_container_width=True)
 
-# -------------------------
-# Step B: Picker / Mapping
-# -------------------------
-st.subheader("Pick Values (Mapping)")
+# ---------------- PICK VALUES (HORIZONTAL) ----------------
+st.subheader("Pick Values")
 
-# Defaults tuned to Adidas sheet
-default_base_cols = [c for c in ["Line Reference","Description","Width","Height","Stock","Finishing","Colour","Sides","Orientation","Qty"] if c in df_raw.columns]
+c1, c2, c3, c4 = st.columns([2.2, 1.6, 2.0, 1.4])
 
-m1, m2, m3, m4 = st.columns([1.2, 1.2, 1.2, 1.2])
+with c1:
+    st.markdown("**Size**")
+    size_mode = st.radio("", ["W+H columns", "Size text column", "Circle diameter column"], index=0, horizontal=True, label_visibility="collapsed")
+    if size_mode == "W+H columns":
+        w_col = st.selectbox("Width column", df_raw.columns, index=df_raw.columns.get_loc("Width") if "Width" in df_raw.columns else 0)
+        h_col = st.selectbox("Height column", df_raw.columns, index=df_raw.columns.get_loc("Height") if "Height" in df_raw.columns else 0)
+        size_text_col = None
+        dia_col = None
+    elif size_mode == "Size text column":
+        size_text_col = st.selectbox("Size column", df_raw.columns, index=df_raw.columns.get_loc("Description") if "Description" in df_raw.columns else 0)
+        w_col = h_col = None
+        dia_col = None
+    else:
+        dia_col = st.selectbox("Diameter column", df_raw.columns)
+        w_col = h_col = None
+        size_text_col = None
 
-with m1:
-    col_desc = st.selectbox("Description column", df_raw.columns, index=df_raw.columns.get_loc("Description") if "Description" in df_raw.columns else 0)
-with m2:
-    col_stock = st.selectbox("Customer stock column", df_raw.columns, index=df_raw.columns.get_loc("Stock") if "Stock" in df_raw.columns else 0)
-with m3:
-    size_mode = st.radio("Size source", ["Two columns (W+H)", "Single column"], index=0, horizontal=True)
-with m4:
-    units = st.selectbox("Units", ["mm","cm","m"], index=0)
+with c2:
+    st.markdown("**Stock**")
+    stock_col = st.selectbox("", df_raw.columns, index=df_raw.columns.get_loc("Stock") if "Stock" in df_raw.columns else 0, label_visibility="collapsed")
 
-if size_mode.startswith("Two"):
-    cW, cH = st.columns(2)
-    with cW:
-        col_w = st.selectbox("Width column", df_raw.columns, index=df_raw.columns.get_loc("Width") if "Width" in df_raw.columns else 0)
-    with cH:
-        col_h = st.selectbox("Height column", df_raw.columns, index=df_raw.columns.get_loc("Height") if "Height" in df_raw.columns else 0)
-    col_size = None
-else:
-    col_size = st.selectbox("Size column", df_raw.columns, index=df_raw.columns.get_loc("Description") if "Description" in df_raw.columns else 0)
-    col_w, col_h = None, None
+with c3:
+    st.markdown("**Qty**")
+    qty_mode = st.radio("", ["Single Qty column", "Multiple Qty columns (Adidas)"], index=1, horizontal=True, label_visibility="collapsed")
+    if qty_mode == "Single Qty column":
+        qty_col = st.selectbox("Qty column", df_raw.columns, index=df_raw.columns.get_loc("Qty") if "Qty" in df_raw.columns else 0)
+        start_col = end_col = None
+    else:
+        start_col = st.selectbox("Start qty column", df_raw.columns)
+        end_col = st.selectbox("End qty column", df_raw.columns, index=len(df_raw.columns)-1)
+        qty_col = None
 
-q1, q2, q3 = st.columns([1.2,1.2,1.6])
-with q1:
-    qty_mode = st.radio("Qty mode", ["Multiple variant columns (Adidas)", "Single column"], index=0)
-with q2:
-    col_qty_single = st.selectbox("Qty column (if single)", df_raw.columns, index=df_raw.columns.get_loc("Qty") if "Qty" in df_raw.columns else 0)
-with q3:
-    st.caption("For Adidas variant columns, pick which columns represent quantities. The app will melt them into rows.")
+with c4:
+    st.markdown("**Sides**")
+    sides_mode = st.radio("", ["Default", "From column"], index=0, horizontal=True, label_visibility="collapsed")
+    if sides_mode == "Default":
+        sides_default = st.radio("Default sides", ["SS","DS"], index=0, horizontal=True)
+        sides_col = None
+    else:
+        sides_col = st.selectbox("Sides column", df_raw.columns)
+        sides_default = "SS"
 
-# auto-suggest variant columns (everything not base, numeric and has >0)
-base_cols = st.multiselect("ID/Base columns to keep", df_raw.columns.tolist(), default=default_base_cols)
-candidate_variant_cols = [c for c in df_raw.columns if c not in base_cols and is_probably_variant_col(df_raw[c])]
-default_variant_cols = candidate_variant_cols
+with st.expander("Advanced (optional) — Adidas variant header parsing", expanded=False):
+    prefer_header_size = st.checkbox("Prefer Size from qty column header when available", value=True)
+    prefer_header_stock = st.checkbox("Prefer Stock from qty column header when available", value=True)
+    prefer_header_sides = st.checkbox("Prefer Sides from qty column header when available", value=True)
 
-variant_cols = st.multiselect("Variant qty columns (melt these)", df_raw.columns.tolist(), default=default_variant_cols, disabled=(qty_mode!="Multiple variant columns (Adidas)"))
-
-shape_default = st.selectbox("Default shape", ["rectangle","circle","odd"], index=0)
-odd_factor = st.number_input("Odd-shape factor (used only for shape=odd)", min_value=1.00, max_value=2.00, value=1.15, step=0.01)
-
-# -------------------------
-# Step C: Build normalized line items
-# -------------------------
+# ---------------- NORMALIZE ----------------
 st.subheader("Normalized Line Items")
 
+base_cols_guess = [c for c in ["Line Reference","Description","Width","Height","Stock","Finishing","Colour","Sides","Orientation"] if c in df_raw.columns]
 df = df_raw.copy()
 
-# unit conversion factor to mm
-unit_to_mm = {"mm":1.0, "cm":10.0, "m":1000.0}
-u = unit_to_mm[units]
+if qty_mode == "Multiple Qty columns (Adidas)":
+    cols = df.columns.tolist()
+    i0 = cols.index(start_col)
+    i1 = cols.index(end_col)
+    if i0 > i1:
+        i0, i1 = i1, i0
+    qty_cols = cols[i0:i1+1]
 
-lines = None
-
-if qty_mode == "Multiple variant columns (Adidas)":
-    if not variant_cols:
-        st.warning("No variant columns selected. Select at least one.")
-        st.stop()
-    # Melt
     lines = df.melt(
-        id_vars=base_cols,
-        value_vars=variant_cols,
+        id_vars=[c for c in base_cols_guess if c in df.columns],
+        value_vars=qty_cols,
         var_name="variant_spec",
         value_name="qty"
     )
     lines["qty"] = pd.to_numeric(lines["qty"], errors="coerce").fillna(0)
     lines = lines[lines["qty"] > 0].copy()
 
-    # Parse spec from column header
     parsed = lines["variant_spec"].apply(parse_variant_spec).apply(pd.Series)
     lines = pd.concat([lines, parsed], axis=1)
 
-    # Decide size source: use parsed size_text if present; else use W/H
-    # Convert W/H to mm if available
-    if size_mode.startswith("Two") and col_w in lines.columns and col_h in lines.columns:
-        lines["width_mm"] = pd.to_numeric(lines[col_w], errors="coerce") * u
-        lines["height_mm"] = pd.to_numeric(lines[col_h], errors="coerce") * u
+    base_stock = lines[stock_col].astype(str) if stock_col in lines.columns else ""
+    stock_from_header = lines["stock_from_header"].fillna("")
+    lines["stock_customer"] = np.where((prefer_header_stock) & (stock_from_header.astype(str).str.len() > 0),
+                                       stock_from_header.astype(str),
+                                       base_stock)
+
+    if sides_mode == "From column" and sides_col in lines.columns:
+        sides_base = lines[sides_col].astype(str)
     else:
+        sides_base = sides_default
+
+    sides_from_header = lines["sides_text"].fillna("")
+    sides_src = np.where((prefer_header_sides) & (sides_from_header.astype(str).str.len() > 0),
+                         sides_from_header.astype(str),
+                         sides_base)
+    lines["sides"] = pd.Series(sides_src).apply(lambda x: sides_normalize(x, default=sides_default))
+
+    if size_mode == "W+H columns" and w_col in lines.columns and h_col in lines.columns:
+        lines["width_mm"] = pd.to_numeric(lines[w_col], errors="coerce") * u
+        lines["height_mm"] = pd.to_numeric(lines[h_col], errors="coerce") * u
+        lines["diameter_mm"] = np.nan
+        lines["shape"] = "rectangle"
+        lines["size_display"] = lines[w_col].astype(str) + " x " + lines[h_col].astype(str)
+    elif size_mode == "Circle diameter column" and dia_col in lines.columns:
         lines["width_mm"] = np.nan
         lines["height_mm"] = np.nan
+        lines["diameter_mm"] = pd.to_numeric(lines[dia_col], errors="coerce") * u
+        lines["shape"] = "circle"
+        lines["size_display"] = "DIA " + lines[dia_col].astype(str)
+    else:
+        txt = lines[size_text_col].astype(str) if (size_text_col in lines.columns) else lines.get("Description","").astype(str)
+        geo = txt.apply(parse_size_text).apply(pd.Series)
+        lines = pd.concat([lines, geo.rename(columns={"shape":"shape_parsed","width_mm":"w_parsed","height_mm":"h_parsed","diameter_mm":"d_parsed"})], axis=1)
+        lines["width_mm"] = pd.to_numeric(lines["w_parsed"], errors="coerce") * u
+        lines["height_mm"] = pd.to_numeric(lines["h_parsed"], errors="coerce") * u
+        lines["diameter_mm"] = pd.to_numeric(lines["d_parsed"], errors="coerce") * u
+        lines["shape"] = lines["shape_parsed"].replace({"unknown":"rectangle"})
+        lines["size_display"] = txt
 
-    # From size_text in variant_spec if available (avoid duplicate column names)
-    geo = lines["size_text"].apply(parse_size_from_text).apply(pd.Series)
-    geo = geo.rename(columns={
-        "shape": "shape_parsed",
-        "width_mm": "width_mm_parsed",
-        "height_mm": "height_mm_parsed",
-        "diameter_mm": "diameter_mm_parsed",
-    })
-    lines = pd.concat([lines, geo], axis=1)
+    if prefer_header_size:
+        geo_h = lines["size_text"].apply(parse_size_text).apply(pd.Series)
+        geo_h = geo_h.rename(columns={"shape":"shape_h","width_mm":"w_h","height_mm":"h_h","diameter_mm":"d_h"})
+        lines = pd.concat([lines, geo_h], axis=1)
 
-    # Prefer parsed size (from variant header) when present; otherwise use Width/Height columns
-    lines["width_mm"] = np.where(pd.to_numeric(lines["width_mm_parsed"], errors="coerce").notna(),
-                                 pd.to_numeric(lines["width_mm_parsed"], errors="coerce") * u,
-                                 lines["width_mm"])
-    lines["height_mm"] = np.where(pd.to_numeric(lines["height_mm_parsed"], errors="coerce").notna(),
-                                  pd.to_numeric(lines["height_mm_parsed"], errors="coerce") * u,
-                                  lines["height_mm"])
-    lines["diameter_mm"] = np.where(pd.to_numeric(lines["diameter_mm_parsed"], errors="coerce").notna(),
-                                    pd.to_numeric(lines["diameter_mm_parsed"], errors="coerce") * u,
-                                    np.nan)
+        has_rect = pd.to_numeric(lines["w_h"], errors="coerce").notna() & pd.to_numeric(lines["h_h"], errors="coerce").notna()
+        has_circ = pd.to_numeric(lines["d_h"], errors="coerce").notna()
 
-    # Final shape: parsed shape if known, else default selected
-    lines["shape_final"] = lines["shape_parsed"].replace({"unknown": None})
-    lines["shape_final"] = lines["shape_final"].fillna(shape_default)
+        lines.loc[has_rect, "shape"] = "rectangle"
+        lines.loc[has_rect, "width_mm"] = pd.to_numeric(lines.loc[has_rect, "w_h"], errors="coerce") * u
+        lines.loc[has_rect, "height_mm"] = pd.to_numeric(lines.loc[has_rect, "h_h"], errors="coerce") * u
+        lines.loc[has_rect, "diameter_mm"] = np.nan
+        lines.loc[has_rect, "size_display"] = lines.loc[has_rect, "size_text"].astype(str)
 
-    # Choose customer stock: prefer spec stock if present, else base stock column
-    lines["stock_customer_final"] = lines["stock_customer"].fillna(lines[col_stock] if col_stock in lines.columns else None)
-    lines["stock_customer_final"] = lines["stock_customer_final"].astype(str)
-
-    # Description
-    lines["description"] = lines[col_desc].astype(str) if col_desc in lines.columns else ""
+        lines.loc[has_circ, "shape"] = "circle"
+        lines.loc[has_circ, "diameter_mm"] = pd.to_numeric(lines.loc[has_circ, "d_h"], errors="coerce") * u
+        lines.loc[has_circ, "width_mm"] = np.nan
+        lines.loc[has_circ, "height_mm"] = np.nan
+        lines.loc[has_circ, "size_display"] = lines.loc[has_circ, "size_text"].astype(str)
 
 else:
-    # single qty column path (still normalized)
     lines = df.copy()
-    lines["qty"] = pd.to_numeric(lines[col_qty_single], errors="coerce").fillna(0)
+    lines["qty"] = pd.to_numeric(lines[qty_col], errors="coerce").fillna(0)
     lines = lines[lines["qty"] > 0].copy()
+    lines["stock_customer"] = lines[stock_col].astype(str)
+    lines["sides"] = sides_default if sides_mode == "Default" else lines[sides_col].astype(str).apply(lambda x: sides_normalize(x, default=sides_default))
 
-    if size_mode.startswith("Two"):
-        lines["width_mm"] = pd.to_numeric(lines[col_w], errors="coerce") * u
-        lines["height_mm"] = pd.to_numeric(lines[col_h], errors="coerce") * u
+    if size_mode == "W+H columns":
+        lines["width_mm"] = pd.to_numeric(lines[w_col], errors="coerce") * u
+        lines["height_mm"] = pd.to_numeric(lines[h_col], errors="coerce") * u
         lines["diameter_mm"] = np.nan
-        lines["shape_final"] = shape_default
-        lines["size_text"] = lines.apply(lambda r: f"{r[col_w]} x {r[col_h]}", axis=1)
+        lines["shape"] = "rectangle"
+        lines["size_display"] = lines[w_col].astype(str) + " x " + lines[h_col].astype(str)
+    elif size_mode == "Circle diameter column":
+        lines["width_mm"] = np.nan
+        lines["height_mm"] = np.nan
+        lines["diameter_mm"] = pd.to_numeric(lines[dia_col], errors="coerce") * u
+        lines["shape"] = "circle"
+        lines["size_display"] = "DIA " + lines[dia_col].astype(str)
     else:
-        geo = lines[col_size].apply(parse_size_from_text).apply(pd.Series)
-        lines = pd.concat([lines, geo], axis=1)
-        lines["width_mm"] = geo["width_mm"]*u
-        lines["height_mm"] = geo["height_mm"]*u
-        lines["diameter_mm"] = geo["diameter_mm"]*u
-        lines["shape_final"] = lines["shape"].replace({"unknown": shape_default})
-        lines["size_text"] = lines[col_size].astype(str)
+        txt = lines[size_text_col].astype(str)
+        geo = txt.apply(parse_size_text).apply(pd.Series)
+        lines["width_mm"] = pd.to_numeric(geo["width_mm"], errors="coerce") * u
+        lines["height_mm"] = pd.to_numeric(geo["height_mm"], errors="coerce") * u
+        lines["diameter_mm"] = pd.to_numeric(geo["diameter_mm"], errors="coerce") * u
+        lines["shape"] = geo["shape"].replace({"unknown":"rectangle"})
+        lines["size_display"] = txt
 
-    lines["stock_customer_final"] = lines[col_stock].astype(str)
-    lines["description"] = lines[col_desc].astype(str)
+lines["sqm_each"] = lines.apply(lambda r: sqm_calc(r.get("shape","rectangle"), r.get("width_mm"), r.get("height_mm"), r.get("diameter_mm")), axis=1)
+lines["total_sqm"] = pd.to_numeric(lines["sqm_each"], errors="coerce") * pd.to_numeric(lines["qty"], errors="coerce")
 
-# SQM + totals
-lines["sqm_each"] = lines.apply(lambda r: sqm_from_geometry(
-    r.get("shape_final","rectangle"),
-    r.get("width_mm", None),
-    r.get("height_mm", None),
-    r.get("diameter_mm", None),
-    odd_factor=odd_factor
-), axis=1)
-
-lines["total_sqm"] = lines["sqm_each"] * lines["qty"]
-
-# -------------------------
-# Step D: Stock mapping + rate
-# -------------------------
-st.subheader("Stock Mapping (Customer → Standard)")
+# ---------------- STOCK MAPPING ----------------
+st.subheader("Stock Mapping (Customer name → Standard stock with sqm rate)")
 
 mapping = load_mapping(customer)
+unique_cs = sorted({s for s in lines["stock_customer"].dropna().astype(str).tolist() if clean_text(s)})
 
-unique_customer_stocks = sorted(set([s for s in lines["stock_customer_final"].dropna().astype(str).tolist() if clean_text(s)]))
+map_df = pd.DataFrame([{
+    "customer_stock": cs,
+    "standard_stock": mapping["mappings"].get(clean_text(cs), "")
+} for cs in unique_cs])
 
-# Build editable mapping table
-map_rows = []
-for cs in unique_customer_stocks:
-    cs_key = clean_text(cs)
-    chosen = mapping["mappings"].get(cs_key, "")
-    map_rows.append({"customer_stock_name": cs, "standard_stock": chosen})
-
-df_map = pd.DataFrame(map_rows)
-
-st.caption("Pick the matching standard stock for each customer stock name. This is saved for this customer.")
-edited_map = st.data_editor(
-    df_map,
+edited = st.data_editor(
+    map_df,
     use_container_width=True,
+    hide_index=True,
     column_config={
         "standard_stock": st.column_config.SelectboxColumn("Standard stock", options=[""] + std_options)
-    },
-    num_rows="fixed",
-    hide_index=True
+    }
 )
 
-if st.button("Save stock mappings"):
-    # persist
+if st.button("Save mappings", type="primary"):
     new_map = load_mapping(customer)
-    for _, r in edited_map.iterrows():
-        cs_key = clean_text(r["customer_stock_name"])
-        std_name = (r["standard_stock"] or "").strip()
-        if cs_key and std_name:
-            new_map["mappings"][cs_key] = std_name
+    for _, r in edited.iterrows():
+        cs_key = clean_text(r["customer_stock"])
+        std = str(r["standard_stock"] or "").strip()
+        if cs_key and std:
+            new_map["mappings"][cs_key] = std
     save_mapping(customer, new_map)
-    st.success("Saved mappings.")
+    st.success("Mappings saved.")
 
-# Apply mapping
 mapping = load_mapping(customer)
-lines["stock_std"] = lines["stock_customer_final"].apply(lambda x: mapping["mappings"].get(clean_text(x), ""))
+lines["stock_std"] = lines["stock_customer"].apply(lambda x: mapping["mappings"].get(clean_text(x), ""))
+lines["sqm_rate"] = lines["stock_std"].map(std_rate_map)
+lines["line_total"] = pd.to_numeric(lines["total_sqm"], errors="coerce") * pd.to_numeric(lines["sqm_rate"], errors="coerce")
 
-# Join sqm rates
-lines["sqm_rate"] = lines["stock_std"].map(std_rate_map).astype(float)
-lines["line_total"] = lines["total_sqm"] * lines["sqm_rate"]
-
-# -------------------------
-# Step E: Review + Export
-# -------------------------
+# ---------------- REVIEW + EXPORT ----------------
 st.subheader("Quote Review")
 
-missing_map = lines[(lines["stock_std"]=="") | (lines["sqm_rate"].isna())]
-if len(missing_map) > 0:
-    st.warning(f"{len(missing_map)} line(s) are missing stock mapping or sqm rate. Map them above to get totals.")
+missing = lines[(lines["stock_std"]=="") | (lines["sqm_rate"].isna())]
+if len(missing) > 0:
+    st.warning(f"{len(missing)} line(s) missing mapping/rate. Map above to calculate totals.")
 else:
-    st.success("All lines mapped and rated.")
+    st.success("All lines mapped.")
 
-review_cols = ["description","qty","size_text","shape_final","stock_customer_final","stock_std","sqm_each","total_sqm","sqm_rate","line_total"]
-show = lines.copy()
-
-# Keep readable
+review = lines[["qty","sides","shape","size_display","stock_customer","stock_std","sqm_each","total_sqm","sqm_rate","line_total"]].copy()
 for c in ["sqm_each","total_sqm","sqm_rate","line_total"]:
-    show[c] = pd.to_numeric(show[c], errors="coerce")
+    review[c] = pd.to_numeric(review[c], errors="coerce")
 
-st.dataframe(show[review_cols].sort_values(["stock_std","description"]).reset_index(drop=True), use_container_width=True)
+st.dataframe(review.sort_values(["stock_std","shape"]).reset_index(drop=True), use_container_width=True)
 
-# Summary
-total_sqm = float(pd.to_numeric(lines["total_sqm"], errors="coerce").fillna(0).sum())
-subtotal = float(pd.to_numeric(lines["line_total"], errors="coerce").fillna(0).sum())
-df_summary = pd.DataFrame([
+total_sqm = float(review["total_sqm"].fillna(0).sum())
+subtotal = float(review["line_total"].fillna(0).sum())
+
+summary = pd.DataFrame([
     {"Label":"Customer", "Value": customer},
     {"Label":"Sheet", "Value": sheet_name},
     {"Label":"Total SQM", "Value": f"{total_sqm:,.3f}"},
@@ -477,43 +434,26 @@ df_summary = pd.DataFrame([
 ])
 
 st.markdown("**Totals**")
-st.table(df_summary)
+st.table(summary)
 
-c1, c2 = st.columns(2)
-
-with c1:
-    xlsx_bytes = export_quote_excel(show[review_cols], df_summary)
+b1, b2 = st.columns(2)
+with b1:
+    xbytes = export_quote_excel(review, summary)
     st.download_button(
         "Download Quote Excel",
-        data=xlsx_bytes,
+        data=xbytes,
         file_name=f"Quote_{customer}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-with c2:
-    pdf_bytes = export_quote_pdf(df_summary, show[review_cols], title=f"Quote - {customer}")
+with b2:
+    pbytes = export_quote_pdf(summary, review, title=f"Quote - {customer}")
     st.download_button(
         "Download Quote PDF",
-        data=pdf_bytes,
+        data=pbytes,
         file_name=f"Quote_{customer}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
         mime="application/pdf"
     )
 
-st.divider()
-with st.expander("Developer notes / how this MVP is wired for Adidas", expanded=False):
-    st.markdown("""
-- Default sheet: **Standard_ WHS Pr MY AUS**
-- Default header row: **6**
-- Variant qty columns: auto-detected as numeric columns with at least one value > 0, excluding base/id columns
-- Variant column headers are parsed by splitting on newline:
-  - line 1 → size
-  - line 2 → colour
-  - line 3 → sides
-  - line 4 → stock
-  - line 5 → finishing
-- Size parsing supports:
-  - `1200 x 900`
-  - `dia 600` / `diameter 600`
-- Pricing:
-  - Material-only = **total_sqm × sqm_rate** using your standard stocks table
-""")
+with st.expander("Version / Debug", expanded=False):
+    st.write("APP VERSION:", APP_VERSION)
+    st.write("Rows:", len(lines), " | Unique customer stocks:", len(unique_cs))
