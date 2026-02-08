@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 import openpyxl
 
-APP_VERSION = "simple-ui-v2-preserve-export"
+APP_VERSION = "simple-ui-v3-openpyxl-preserve-format"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -271,8 +271,11 @@ if qty_mode == "Multiple Qty columns (Adidas)":
         i0, i1 = i1, i0
     qty_cols = cols[i0:i1+1]
 
+    df = df.copy()
+    df["origin_row"] = df.index
+
     lines = df.melt(
-        id_vars=[c for c in base_cols_guess if c in df.columns],
+        id_vars=["origin_row"] + [c for c in base_cols_guess if c in df.columns],
         value_vars=qty_cols,
         var_name="variant_spec",
         value_name="qty"
@@ -344,6 +347,7 @@ if qty_mode == "Multiple Qty columns (Adidas)":
 
 else:
     lines = df.copy()
+    lines["origin_row"] = lines.index
     lines["qty"] = pd.to_numeric(lines[qty_col], errors="coerce").fillna(0)
     lines = lines[lines["qty"] > 0].copy()
     lines["stock_customer"] = lines[stock_col].astype(str)
@@ -515,15 +519,85 @@ def build_customer_format_export() -> pd.DataFrame:
     return df_out
 
 def export_preserving_excel() -> bytes:
-    df_customer = build_customer_format_export()
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        # Write customer-format sheet with same name
-        df_customer.to_excel(writer, index=False, sheet_name=sheet_name[:31])
-        if include_detail_sheets:
-            summary.to_excel(writer, index=False, sheet_name="Quote Summary")
-            review.to_excel(writer, index=False, sheet_name="Line Items")
-    return bio.getvalue()
+    """
+    Export by editing the ORIGINAL workbook with openpyxl so the sheet structure/format stays the same.
+    We only write price values into the chosen column.
+    """
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    # Build row totals by original row position
+    if "variant_spec" in lines.columns:
+        row_totals = lines.groupby("origin_row")["line_total"].sum()
+    else:
+        row_totals = lines.groupby("origin_row")["line_total"].sum()
+
+    # Load original workbook from uploaded file (Streamlit uploader gives a file-like object)
+    uploaded.seek(0)
+    wb = load_workbook(uploaded)
+    ws = wb[sheet_name]
+
+    hdr_row = int(header_row)  # 1-indexed header row in Excel
+    # Find target column index
+    if price_target == "Add new column at end":
+        target_col_idx = ws.max_column + 1
+        header_cell = ws.cell(row=hdr_row, column=target_col_idx, value="Price")
+        # copy style from previous header cell if possible
+        if target_col_idx > 1:
+            prev = ws.cell(row=hdr_row, column=target_col_idx-1)
+            header_cell._style = prev._style
+            header_cell.font = prev.font
+            header_cell.fill = prev.fill
+            header_cell.border = prev.border
+            header_cell.alignment = prev.alignment
+            header_cell.number_format = prev.number_format
+    else:
+        # Locate existing column by matching the header cell value in header row
+        target_col_idx = None
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(row=hdr_row, column=c).value
+            if str(v).strip() == str(price_target).strip():
+                target_col_idx = c
+                break
+        if target_col_idx is None:
+            # fallback: add new at end if header not found
+            target_col_idx = ws.max_column + 1
+            ws.cell(row=hdr_row, column=target_col_idx, value="Price")
+
+    # Write values into rows (data starts at hdr_row + 1)
+    # Pandas df_raw has 0-based row index that maps to Excel row hdr_row+1+i
+    for i, val in row_totals.items():
+        excel_row = hdr_row + 1 + int(i)
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            continue
+        cell = ws.cell(row=excel_row, column=target_col_idx)
+        cell.value = float(val)
+
+        # Optional: set number format to 2 decimals while keeping style
+        cell.number_format = "0.00"
+
+    # Optionally add detail sheets without altering the original sheet
+    if include_detail_sheets:
+        # Remove existing detail sheets if present to avoid duplicates
+        for name in ["Quote Summary", "Line Items"]:
+            if name in wb.sheetnames:
+                del wb[name]
+        ws_sum = wb.create_sheet("Quote Summary")
+        for r_idx, row in enumerate(summary.itertuples(index=False), start=1):
+            ws_sum.cell(row=r_idx, column=1, value=row.Label)
+            ws_sum.cell(row=r_idx, column=2, value=row.Value)
+
+        ws_li = wb.create_sheet("Line Items")
+        for c_idx, col in enumerate(review.columns.tolist(), start=1):
+            ws_li.cell(row=1, column=c_idx, value=col)
+        for r_idx, row in enumerate(review.itertuples(index=False), start=2):
+            for c_idx, v in enumerate(row, start=1):
+                ws_li.cell(row=r_idx, column=c_idx, value=v)
+
+    # Save workbook to bytes
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 b1, b2 = st.columns(2)
 with b1:
